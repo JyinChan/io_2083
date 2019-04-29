@@ -1,0 +1,90 @@
+mina心跳机制
+1、配置
+KeepAliveFilter(factory, handler, interestStatus, requestInterval, requestTimeout)
+KeepAliveFilterFactory
+KeepAliveTimeoutHandler
+
+2、策略
+interestIdleStatus BOTH READ WRITE
+默认factory 不发送任何心跳
+默认handler 不等待response 不处理timeout
+
+对于指定的factory和handler
+RequestInterval不活跃（具体由interestIdleStatus定义不活跃）
+发送心跳消息，并等待response
+RequestTimeout无response，handleTimeout（BOTH是2*RequestTimeout）
+
+mina select机制
+默认SELECT_TIMEOUT=1s
+
+
+mina注册机制
+服务端：accept后构建Session放进processor的registerQueue，由select线程去注册
+
+mina发送机制
+将发送内容放到writeQueue，相应session放到flushQueue，由select线程写入缓冲区（有写入字节限制）
+
+mina关闭机制
+
+mina支持挂起读写
+
+mina服务端
+Acceptor和Processor
+Acceptor维护一个绑定队列，负责绑定端口和建立连接，将建立的连接交给Processor
+Processor维护一个待注册队列，将连接注册到selector上，处理连接事件；维护一个flushSession队列，发送会话消息；KeepAlive；
+
+mina客户端
+Connector和Processor
+Connector将建立的连接交给Processor，也就是说Connector负责连接和完成连接；
+
+
+//my design
+支持：
+1keepAlive、2select Thread 注册（包括interestOps）、3多线程、4挂起读、写、5支持writeTimeout
+
+类结构
+EventHandler interface
+method：fireEventHandle/fireEventWrite
+
+NioProcessor reactor
+
+
+Acceptor impl EventHandler
+Session impl EventHandler
+
+Session
+field: coder/handler/
+
+Encoder
+Decoder
+
+NioServerStarter
+NioClientStarter
+
+CompletionHandler
+method:
+messageReceived
+messageSent
+messageSendBefore
+exceptionCaught
+sessionClosed
+sessionCreated
+readTimeout
+writeTimeout
+messagesSendFailed
+
+KeepAliveHandler
+
+3机制
+        ---------                      ------------
+       |processor| -----------------> |EventHandler|
+        ---------                      ------------
+          ......       maybe multi        ......
+(register/keepAlive/fireEvent)      (accept|write/read/notifier)
+
+
+
+
+
+测试
+channel关闭select是否唤醒
