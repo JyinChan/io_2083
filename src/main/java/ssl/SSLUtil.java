@@ -7,6 +7,26 @@ import java.security.KeyStore;
 import java.security.PublicKey;
 import java.security.cert.Certificate;
 
+/**
+ * keytool -genkey -keyalg RSA -alias selfsigned -keystore keystore.jks -storepass password
+ *
+ *      client          server          message
+ *      ======          ======          =======
+ *      wrap()          ...             ClientHello
+ *      ...             unwrap()        ClientHello
+ *      ...             wrap()          ServerHello/Certificate
+ *      unwrap()        ...             ServerHello/Certificate
+ *      wrap()          ...             ClientKeyExchange
+ *      wrap()          ...             ChangeCipherSpec
+ *      wrap()          ...             Finished
+ *      ...             unwrap()        ClientKeyExchange
+ *      ...             unwrap()        ChangeCipherSpec
+ *      ...             unwrap()        Finished
+ *      ...             wrap()          ChangeCipherSpec
+ *      ...             wrap()          Finished
+ *      unwrap()        ...             ChangeCipherSpec
+ *      unwrap()        ...             Finished
+ */
 public class SSLUtil {
 
     public static void main(String args[]) throws Exception {

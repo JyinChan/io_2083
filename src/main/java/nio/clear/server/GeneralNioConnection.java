@@ -1,4 +1,4 @@
-package com.couger.tradingcenter.server.nio;
+package nio.clear.server;
 
 import java.io.IOException;
 import java.net.Socket;
@@ -9,8 +9,6 @@ import java.nio.channels.SocketChannel;
 import java.util.Queue;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.atomic.AtomicInteger;
-
-import com.couger.tradingcenter.utility.Utility;
 
 public class GeneralNioConnection extends NioConnection {
 
@@ -92,7 +90,8 @@ public class GeneralNioConnection extends NioConnection {
             } else {
                 readState = ReadHeaderState;
                 readBuf = (ByteBuffer) header.clear();
-                String readMsg = filter(Utility.format05D(content), content);
+                //todo
+                String readMsg = filter(""/*Utility.format05D(content)*/, content);
                 if(readMsg != null)
                     try { ioListener.messageReceived(this, readMsg); } catch (Exception e) { exceptionCaught(e); }
             }

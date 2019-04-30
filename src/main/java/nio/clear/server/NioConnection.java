@@ -1,15 +1,12 @@
-package com.couger.tradingcenter.server.nio;
+package nio.clear.server;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
-
 import java.nio.ByteBuffer;
 import java.nio.channels.SelectionKey;
 import java.nio.channels.SocketChannel;
-
-import java.util.concurrent.atomic.AtomicBoolean;
 
 public abstract class NioConnection implements Processable {
 
