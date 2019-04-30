@@ -1,15 +1,15 @@
-package nio.clear.server;
+package com.couger.tradingcenter.server.nio;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.io.IOException;
 import java.lang.reflect.Constructor;
+
+import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.nio.channels.*;
-import java.util.Iterator;
-import java.util.Queue;
-import java.util.Set;
+
+import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
 
@@ -26,8 +26,6 @@ public class Reactor {
 
     private Selector selector;
 
-    private AtomicBoolean start = new AtomicBoolean(false);
-
     private long lastCheckIdleTime;
 
     //channel.register maybe cause block if it invoked by non-reactor thread, so we need a queue for reactor to process
@@ -38,7 +36,8 @@ public class Reactor {
     public Reactor() {
         try {
             selector = Selector.open();
-        } catch (Exception e) {
+        } catch (IOException ioe) {
+            logger.error("", ioe);
             throw new RuntimeException();
         }
     }
@@ -98,31 +97,34 @@ public class Reactor {
     }
 
     public void start() {
-        if(!start.compareAndSet(false, true)) return;
+        if(reactorThread != null) return;
         reactorThread = new Thread(() -> {
 
-            try {
-                while (true) {
-                    int readyChannels = selector.select(SELECT_TIMEOUT);
-                    long currentTime = System.currentTimeMillis();
-                    if (readyChannels > 0) {
-                        Set<SelectionKey> selectedKeys = selector.selectedKeys();
-                        for (Iterator<SelectionKey> it = selectedKeys.iterator(); it.hasNext(); ) {
-                            SelectionKey key = it.next();
-                            Processable p = (Processable) key.attachment();
-                            p.process(currentTime, false);
-                            it.remove();
-                        }
-                    }
-
-                    doRegister();
-
-                    doProcess(currentTime);
-
-                    notifyIdleConn(currentTime);
+            while (true) {
+                int readyChannels = 0;
+                try {
+                    readyChannels = selector.select(SELECT_TIMEOUT);
+                } catch (IOException ioe) {
+                    //I don't know how it perform(normal or not in next select) after a IOException thrown.
+                    try { Thread.sleep(SELECT_TIMEOUT); } catch (InterruptedException ignore) {}
+                    logger.error("", ioe);
                 }
-            } catch (Exception e) {
-                logger.error("", e);
+                long currentTime = System.currentTimeMillis();
+                if (readyChannels > 0) {
+                    Set<SelectionKey> selectedKeys = selector.selectedKeys();
+                    for (Iterator<SelectionKey> it = selectedKeys.iterator(); it.hasNext(); ) {
+                        SelectionKey key = it.next();
+                        Processable p = (Processable) key.attachment();
+                        p.process(currentTime, false);
+                        it.remove();
+                    }
+                }
+
+                doRegister();
+
+                doProcess(currentTime);
+
+                notifyIdleConn(currentTime);
             }
         }, "Reactor_Thread");
         reactorThread.start();
@@ -195,9 +197,8 @@ public class Reactor {
     private SelectionKey register(SelectableChannel channel, int ops, Object att) {
         try {
             return channel.register(selector, ops, att);
-        } catch (IOException ioe) {
+        } catch (ClosedChannelException ioe) {
             logger.error("", ioe);
-            close(channel);
         }
         return null;
     }
@@ -229,15 +230,29 @@ public class Reactor {
         @Override
         public void process(long currentTime, boolean apply) {
             SocketChannel clientChannel;
+            int cnt = 0;
             try {
-                clientChannel = serverChannel.accept();
-                if(clientChannel != null) {
-                    clientChannel.socket().setTcpNoDelay(true);
-                    clientChannel.configureBlocking(false);
-                    NioConnection connection = constructor.newInstance(Reactor.this, clientChannel, listenerClass.newInstance());
-                    doConnectionReg(connection);
+                while(cnt++ < 5) {
+                    clientChannel = serverChannel.accept();
+                    if (clientChannel != null) {
+                        try {
+                            clientChannel.socket().setTcpNoDelay(true);
+                            clientChannel.configureBlocking(false);
+                            NioConnection connection = constructor.newInstance(Reactor.this, clientChannel, listenerClass.newInstance());
+                            doConnectionReg(connection);
+                        } catch (Exception e) {
+                            logger.error("", e);
+                            close(clientChannel);
+                        }
+                    } else {
+                        break;
+                    }
                 }
-            } catch (Exception e) {
+            } catch (IOException e) {
+                if(e.getMessage().equals("open too many files")) {
+                    // Prevent the select spin like crazy doing nothing but eating CPU
+                    try { Thread.sleep(50); } catch (InterruptedException ignore) { }
+                }
                 logger.error("", e);
             }
         }

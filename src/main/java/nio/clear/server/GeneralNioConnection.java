@@ -1,4 +1,4 @@
-package nio.clear.server;
+package com.couger.tradingcenter.server.nio;
 
 import java.io.IOException;
 import java.net.Socket;
@@ -8,7 +8,9 @@ import java.nio.channels.SelectionKey;
 import java.nio.channels.SocketChannel;
 import java.util.Queue;
 import java.util.concurrent.ConcurrentLinkedQueue;
-import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
+
+import com.couger.tradingcenter.utility.Utility;
 
 public class GeneralNioConnection extends NioConnection {
 
@@ -16,16 +18,16 @@ public class GeneralNioConnection extends NioConnection {
 
     private final Queue<ByteBuffer> writeQueue = new ConcurrentLinkedQueue<>();
 
+    private volatile boolean flushable = false;
     private volatile boolean suspendRead = false;
     private volatile boolean closed = false;
     private volatile boolean unregistered = false;
 
-    private AtomicBoolean applyMark = new AtomicBoolean(false);
+    private AtomicInteger applyMark = new AtomicInteger(0);
 
     GeneralNioConnection(Reactor reactor, SocketChannel channel, IoListener ioListener) {
+        super(channel, ioListener);
         this.reactor = reactor;
-        this.channel = channel;
-        this.ioListener = ioListener;
     }
 
     @Override
@@ -42,24 +44,33 @@ public class GeneralNioConnection extends NioConnection {
                         finishConnect();
                     }
                 } else {
-                    //flush apply
-                    flush(currentTime);
-                    //suspend apply
+                    if(flushable) {
+                        flushable = false;
+                        flush(currentTime);
+                    }
+                    //if apply suspend
                     suspendNow();
-                    //close apply
+
                     if (closed) {
                         closeNow();
                     }
-
                 }
             }
 
         } catch (CancelledKeyException cke) {
-            ioListener.exceptionCaught(this, cke);
-        } catch (Exception e) { //IOException or NumberFormat even more
-            ioListener.exceptionCaught(this, e);
-            closeNow();
+            //only caused by unregister()
+            exceptionCaught(cke);
+        } catch (Exception e) {
+            exceptionCaught(e);
+            //must close
+            close();
         }
+    }
+
+    @Override
+    protected void finishConnect() {
+        key.interestOps(SelectionKey.OP_READ);
+        super.finishConnect();
     }
 
     private static final int ReadHeaderState = 0;
@@ -70,11 +81,7 @@ public class GeneralNioConnection extends NioConnection {
 
     private void read(long currentTime) throws IOException {
 
-        int r = channel.read(readBuf);
-        if(r == -1)
-            throw new IOException("-1");
-        if(r > 0)
-            updateLastReadTime(currentTime);
+        channelRead(readBuf, currentTime);
 
         if(!readBuf.hasRemaining()) {
             String content = new String(readBuf.array());
@@ -85,20 +92,17 @@ public class GeneralNioConnection extends NioConnection {
             } else {
                 readState = ReadHeaderState;
                 readBuf = (ByteBuffer) header.clear();
-                //todo take place of String.format
-                String readMsg = filter(String.format("%05d%s", content.getBytes().length, content), content);
+                String readMsg = filter(Utility.format05D(content), content);
                 if(readMsg != null)
-                    ioListener.messageReceived(this, readMsg);
+                    try { ioListener.messageReceived(this, readMsg); } catch (Exception e) { exceptionCaught(e); }
             }
         }
     }
 
     private void flush(long currentTime) throws IOException {
-        //if(writeQueue.isEmpty()) return;
         ByteBuffer writeBuf;
         for(int i = 0; (writeBuf = writeQueue.peek())!=null && i<3; i++) {
-            if (channel.write(writeBuf) > 0)
-                updateLastWriteTime(currentTime);
+            channelWrite(writeBuf, currentTime);
             if(writeBuf.hasRemaining()) break;
             writeQueue.poll();
         }
@@ -111,11 +115,11 @@ public class GeneralNioConnection extends NioConnection {
         }
     }
 
-    boolean setApplyMark(boolean newValue) {
+    protected boolean setApplyMark(boolean newValue) {
         if(newValue) {
-            return applyMark.compareAndSet(false, true);
+            return applyMark.compareAndSet(0, 1);
         }
-        applyMark.set(false);
+        applyMark.set(0);
         return true;
     }
 
@@ -156,9 +160,11 @@ public class GeneralNioConnection extends NioConnection {
             logger.warn("write[null] is not allowed");
             return false;
         }
-        writeQueue.add(ByteBuffer.wrap(writeMsg.getBytes()));
-        reactor.applyProcess(this);
-        return true;
+        flushable = writeQueue.add(ByteBuffer.wrap(writeMsg.getBytes()));
+        if(flushable) {
+            reactor.applyProcess(this);
+        }
+        return flushable;
     }
 
     @Override
@@ -176,13 +182,8 @@ public class GeneralNioConnection extends NioConnection {
 
     private void closeNow() {
         if(channel.isOpen()) {
-            try {
-                channel.close();
-            } catch (IOException ioe) {
-                ioListener.exceptionCaught(this, ioe);
-            }
-            ioListener.connectionClosed(this);
-            closed = true;
+            try { channel.close(); } catch (IOException ioe) { exceptionCaught(ioe);}
+            try { ioListener.connectionClosed(this); } catch (Exception e) { exceptionCaught(e);}
         }
     }
 

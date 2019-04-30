@@ -1,11 +1,14 @@
-package nio.clear.server;
+package com.couger.tradingcenter.server.nio;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
+
+import java.nio.ByteBuffer;
 import java.nio.channels.SelectionKey;
 import java.nio.channels.SocketChannel;
+
 import java.util.concurrent.atomic.AtomicBoolean;
 
 public abstract class NioConnection implements Processable {
@@ -40,7 +43,7 @@ public abstract class NioConnection implements Processable {
     private String pingResponse;
     private int pingTimeout;
 
-    private AtomicBoolean config = new AtomicBoolean(false);
+    private volatile boolean isConfigured;
 
     protected SocketChannel channel;
     protected volatile IoListener ioListener;
@@ -50,64 +53,54 @@ public abstract class NioConnection implements Processable {
 
     private int connectionId;
 
-    NioConnection() {}
+    NioConnection(SocketChannel channel, IoListener ioListener) {
+        this.channel = channel;
+        this.ioListener = ioListener;
+    }
 
-    protected void finishConnect() {
-        if(!channel.isConnected()) {
-            try {
-                channel.finishConnect();
-            } catch (IOException ioe) {
-                logger.error("{} socket[{}]", ioe.getMessage(), getRemote());
-                try { channel.close(); } catch (IOException ignore) {}
-                if (regFuture != null) regFuture.done(null);
-                return;
-            }
+    public void config(int interestedIdleStatus, int idleIntervalMillis, String pingRequest, String pingResponse, boolean isPingActive, int pingTimeoutMillis) {
+        if(isConfigured)
+            throw new IllegalStateException("has configured!");
+        isConfigured = true;
+        //check simply
+        if(interestedIdleStatus != READ_IDLE_STATUS &&
+                interestedIdleStatus != WRITE_IDLE_STATUS &&
+                interestedIdleStatus != BOTH_IDLE_STATUS &&
+                interestedIdleStatus != DEFAULT_IDLE_STATUS) {
+            throw new IllegalArgumentException("interestedIdleStatus:"+interestedIdleStatus);
         }
-        int ops = 0;
-        if(this instanceof GeneralNioConnection)
-            ops = SelectionKey.OP_READ;
-        key.interestOps(ops);
-
-        connectionId = ++autoIncrementId;
-
-        if (regFuture != null) regFuture.done(this);
-        ioListener.connectionOpened(this);
+        if(pingRequest != null && pingRequest.equals(pingResponse))
+            throw new IllegalArgumentException("pingRequest must neq pingResponse");
+        this.idleStatus = interestedIdleStatus;
+        this.idleInterval = idleIntervalMillis<1000 ? 1000:idleIntervalMillis;
+        this.pingRequest = pingRequest;
+        this.pingResponse = pingResponse;
+        this.isPingActive = isPingActive;
+        this.pingTimeout = isPingActive ? (pingTimeoutMillis < 1000 ? 1000 : pingTimeoutMillis) : 0;
     }
 
     public void setIoListener(IoListener listener) {
         this.ioListener = listener;
     }
 
-    public void config(int interestedIdleStatus, int idleIntervalMillis, String pingRequest, String pingResponse, boolean isPingActive, int pingTimeoutMillis) {
-        if(!config.compareAndSet(false, true))
-            throw new IllegalStateException();
-        //check simply
-        if(interestedIdleStatus != READ_IDLE_STATUS &&
-                interestedIdleStatus != WRITE_IDLE_STATUS &&
-                interestedIdleStatus != BOTH_IDLE_STATUS &&
-                interestedIdleStatus != DEFAULT_IDLE_STATUS) {
-            throw new IllegalArgumentException();
+    protected void finishConnect() {
+        if(!channel.isConnected()) {
+            try {
+                channel.finishConnect();
+            } catch (IOException ioe) {
+                logger.error("finishConnect exception[{}] remote[{}]", ioe.getMessage(), getRemote());
+                try { channel.close(); } catch (IOException ignore) {}
+                if (regFuture != null) regFuture.done(null);
+                return;
+            }
         }
-        this.idleStatus = interestedIdleStatus;
-        this.idleInterval = idleIntervalMillis<1000 ? 1000:idleIntervalMillis;
-        this.pingRequest = pingRequest;
-        this.pingResponse = pingResponse;
-        if(isPingActive && pingTimeoutMillis < 1000)
-            throw new IllegalArgumentException();
-        this.isPingActive = isPingActive;
-        this.pingTimeout = pingTimeoutMillis;
-    }
-
-    protected void updateLastReadTime(long time) {
-        lastReadTime = time;
-    }
-
-    protected void updateLastWriteTime(long time) {
-        lastWriteTime = time;
+        connectionId = ++autoIncrementId;
+        if (regFuture != null) regFuture.done(this);
+        try { ioListener.connectionOpened(this); } catch (Exception e) { exceptionCaught(e);}
     }
 
     protected String filter(String originMsg, String decodeMsg) {
-        if(logger.isDebugEnabled()) logger.debug("origin[{}] decode[{}]", originMsg, decodeMsg);
+        //if(logger.isDebugEnabled()) logger.debug("origin[{}] decode[{}]", originMsg, decodeMsg);
         if (pingResponse != null && pingResponse.equals(originMsg)) {
             reset();
             return null;
@@ -146,13 +139,13 @@ public abstract class NioConnection implements Processable {
                     writeAndRead(pingRequest, pingResponse);
                     mark();
                 }
-                ioListener.onTimeout(this, IDLE_TIMEOUT);
+                try { ioListener.onTimeout(this, IDLE_TIMEOUT); } catch (Exception e) { exceptionCaught(e);}
             }
             //ping timeout
             //without update lastIdleTime, so that ping against when next notify
             else {
                 reset();
-                ioListener.onTimeout(this, PING_TIMEOUT);
+                try { ioListener.onTimeout(this, PING_TIMEOUT); } catch (Exception e) { exceptionCaught(e);}
             }
         }
     }
@@ -168,7 +161,28 @@ public abstract class NioConnection implements Processable {
         idleStatus = idleStatus & ~WAIT_STATUS;
     }
 
-    abstract boolean setApplyMark(boolean v);
+    protected void exceptionCaught(Exception e) {
+        try {
+            ioListener.exceptionCaught(this, e);
+        } catch (Exception e1) {
+            logger.error("", e1);
+        }
+    }
+
+    protected void channelRead(ByteBuffer readBuf, long currentTime) throws IOException {
+        int r = channel.read(readBuf);
+        if(r == -1)
+            throw new IOException("-1");
+        if(r > 0)
+            lastReadTime = currentTime;
+    }
+
+    protected void channelWrite(ByteBuffer writeBuf, long currentTime) throws IOException {
+        if (channel.write(writeBuf) > 0)
+            lastWriteTime = currentTime;
+    }
+
+    protected abstract boolean setApplyMark(boolean v);
     public abstract <K> K write(String writeMsg);
     public <T> T writeAndRead(String writeMsg, String readTarget) {
         write(writeMsg);

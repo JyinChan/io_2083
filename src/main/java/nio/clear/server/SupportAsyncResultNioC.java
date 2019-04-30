@@ -1,11 +1,10 @@
-package nio.clear.server;
+package com.couger.tradingcenter.server.nio;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
-import java.nio.channels.CancelledKeyException;
 import java.nio.channels.SelectionKey;
 import java.nio.channels.SocketChannel;
-import java.util.Optional;
+
 import java.util.Queue;
 import java.util.concurrent.ConcurrentLinkedQueue;
 
@@ -23,9 +22,8 @@ public class SupportAsyncResultNioC extends NioConnection {
     private boolean applyMark = false;
 
     SupportAsyncResultNioC(Reactor reactor, SocketChannel channel, IoListener ioListener) {
+        super(channel, ioListener);
         this.reactor = reactor;
-        this.channel = channel;
-        this.ioListener = ioListener;
     }
 
     @Override
@@ -42,46 +40,46 @@ public class SupportAsyncResultNioC extends NioConnection {
                         finishConnect();
                     }
                 } else {
-                    //flush apply
+
                     flush(currentTime);
 
-                    //interest read apply
                     if(interestRead) {
                         interestRead = false;
                         if((key.interestOps() & SelectionKey.OP_READ) == 0) {
                             key.interestOps(key.interestOps() | SelectionKey.OP_READ);
                         }
                     }
-                    //close apply
+
                     if (closed) {
                         release();
                     }
-
                 }
             }
-        } catch (CancelledKeyException cke) {
-            ioListener.exceptionCaught(this, cke);
-        } catch (Exception e) { //IOException even more
-            ioListener.exceptionCaught(this, e);
-            release();
+        } catch (Exception e) {
+            exceptionCaught(e);
+            close();
         }
+    }
+
+    @Override
+    protected void finishConnect() {
+        key.interestOps(0);
+        super.finishConnect();
     }
 
     private void read(long currentTime) throws IOException {
         ReadFuture readFuture = null;
+        ByteBuffer readBuf;
         try {
             for (int i = 0; (readFuture = readQueue.peek()) != null && i < 3; i++) {
-                ByteBuffer readBuf = readFuture.getBuf();
-                int r = channel.read(readBuf);
-                if (r == -1)
-                    throw new IOException("-1");
-                if (r > 0)
-                    updateLastReadTime(currentTime);
+                readBuf = readFuture.getBuf();
+                channelRead(readBuf, currentTime);  //IOE
                 if(readBuf.hasRemaining()) break;
-                String readMsg = readFuture.done(true);
-                Optional.ofNullable(filter(readMsg, readMsg))
-                        .ifPresent(m -> ioListener.messageReceived(this, m));
                 readQueue.poll();
+                String m = readFuture.done(true);
+                m = filter(m, m);
+                if(m != null)
+                    try { ioListener.messageReceived(this, m); } catch (Exception e) { exceptionCaught(e); }
             }
         } catch (IOException ioe) {
             readFuture.done(false);
@@ -95,11 +93,12 @@ public class SupportAsyncResultNioC extends NioConnection {
 
     private void flush(long currentTime) throws IOException {
         WriteFuture future = null;
+        ByteBuffer writeBuf;
         try {
             for (int i = 0; (future = writeQueue.peek()) != null && i < 3; i++) {
-                if (channel.write(future.getBuf()) > 0)
-                    updateLastWriteTime(currentTime);
-                if (future.getBuf().hasRemaining()) break;
+                writeBuf = future.getBuf();
+                channelWrite(writeBuf, currentTime);    //IOE
+                if (writeBuf.hasRemaining()) break;
                 future.done(true);
                 writeQueue.poll();
             }
@@ -116,9 +115,13 @@ public class SupportAsyncResultNioC extends NioConnection {
         }
     }
 
-    boolean setApplyMark(boolean newValue) {
-        //newV = false => return true
-        //newV = true => return !applyMark;
+    /**
+     * newV eq false always return true
+     * newV eq true then return !applyMark;
+     * @param newValue new value of applyMark
+     * @return true if mark success
+     */
+    protected boolean setApplyMark(boolean newValue) {
         boolean apply = applyMark;
         applyMark = newValue;
         return !newValue || !apply;
@@ -141,9 +144,9 @@ public class SupportAsyncResultNioC extends NioConnection {
                 return future;
             }
             writeQueue.add(future);
+            reactor.applyProcess(this);
+            return future;
         }
-        reactor.applyProcess(this);
-        return future;
     }
 
     /**
@@ -187,17 +190,12 @@ public class SupportAsyncResultNioC extends NioConnection {
     }
 
     private void release() {
+        if(channel.isOpen()) {
+            try { channel.close(); } catch (IOException ioe) { exceptionCaught(ioe);}
+            try { ioListener.connectionClosed(this); } catch (Exception e) { exceptionCaught(e);}
+        }
         synchronized (writeQueue) {
             synchronized (readQueue) {
-                if (channel.isOpen()) {
-                    try {
-                        channel.close();
-                    } catch (IOException ioe) {
-                        ioListener.exceptionCaught(this, ioe);
-                    }
-                    ioListener.connectionClosed(this);
-                    closed = true;
-                }
                 for (; ; ) {
                     ReadFuture readFuture = readQueue.poll();
                     if (readFuture == null) break;

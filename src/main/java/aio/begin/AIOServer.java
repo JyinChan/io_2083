@@ -106,29 +106,4 @@ public class AIOServer {
 
     }
 
-    static class Sender implements Runnable {
-
-        private Map<String, AsynchronousSocketChannel> clientChannelMap = new ConcurrentHashMap<>();
-
-        @Override
-        public void run() {
-            Scanner scan = new Scanner(System.in);
-            String line ;
-            CompletionHandler<Integer, ByteBuffer> handler = null;//new WriteCompletionHandler();
-            while(scan.hasNext()) {
-                line = scan.nextLine();
-                ByteBuffer b = ByteBuffer.wrap(line.getBytes());
-                for(Iterator<String> keySetIt = clientChannelMap.keySet().iterator(); keySetIt.hasNext(); ) {
-                    AsynchronousSocketChannel channel = clientChannelMap.get(keySetIt.next());
-                    handler = new WriteCompletionHandler(channel);
-                    channel.write(b, null, handler);
-                }
-            }
-        }
-
-        public void addClient(String user, AsynchronousSocketChannel channel) {
-            //ensure user is unique
-            clientChannelMap.put(user, channel);
-        }
-    }
 }
