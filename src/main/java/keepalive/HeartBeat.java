@@ -2,35 +2,55 @@ package keepalive;
 
 public class HeartBeat {
 
-    private boolean isActiveType;
+    public static HeartBeat buildResponse(String expectRequest, byte[] encodeResponse) {
+        return new HeartBeat(false, null, expectRequest, encodeResponse, null, 15000);
+    }
+
+    public static HeartBeat buildRequest(byte[] encodeRequest, String expectResponse) {
+        return new HeartBeat(true, encodeRequest, null, null, expectResponse, 15000);
+    }
+
+    static HeartBeat buildResponse(String response, long ttl) {
+        return new HeartBeat(false, null, null, null, response, ttl);
+    }
+
+    static HeartBeat buildRequest(String request, long ttl) {
+        return new HeartBeat(true, null, request, null, null, ttl);
+    }
+
+    static HeartBeat buildException(HeartBeatException heartBeatException) {
+        HeartBeat heartBeat = new HeartBeat();
+        heartBeat.heartBeatException = heartBeatException;
+        return heartBeat;
+    }
+
+    private boolean requestPacket;  //if true indicates that it is a heartbeat request.
     private byte[] encodeRequest;
     private String request;
     private String response;
-    private long ttl;
+    private byte[] encodeResponse;
+    private long ttl; //(millis)time to live, heartbeat interval about ttl/3.
 
     private HeartBeatException heartBeatException;
 
-    public HeartBeat(HeartBeatException heartBeatException) {
-        this.heartBeatException = heartBeatException;
-    }
+    private HeartBeat() {}
 
-    public HeartBeat(String request, String response, long ttl) {
-        this.request = request;
-        this.response = response;
-        this.ttl = ttl;
-        this.isActiveType = false;
-    }
-
-    public HeartBeat(byte[] encodeRequest, String request, String response, long ttl) {
+    private HeartBeat(boolean requestPacket, byte[] encodeRequest, String request, byte[] encodeResponse, String response, long ttl) {
+        this.requestPacket = requestPacket;
         this.encodeRequest = encodeRequest;
         this.request = request;
         this.response = response;
+        this.encodeResponse = encodeResponse;
         this.ttl = ttl;
-        this.isActiveType = true;
     }
 
-    public boolean isActiveType() {
-        return isActiveType;
+    public HeartBeat withTTL(long ttl) {
+        this.ttl = ttl;
+        return this;
+    }
+
+    boolean isRequestPacket() {
+        return requestPacket;
     }
 
     public byte[] getEncodeRequest() {
@@ -43,6 +63,10 @@ public class HeartBeat {
 
     public String getResponse() {
         return response;
+    }
+
+    public byte[] getEncodeResponse() {
+        return encodeResponse;
     }
 
     public long getTTL() {

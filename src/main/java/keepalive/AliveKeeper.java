@@ -3,74 +3,101 @@ package keepalive;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.Iterator;
 import java.util.Map;
 import java.util.concurrent.*;
-import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
+/**
+ * We start two threads, one to actively send heartbeat requests (TTL /3 intervals) and one to terminate the heartbeat.
+ * When we receive a heartbeat response, we update its deadline and the next heartbeat request time.
+ * When we receive a heartbeat request, we update its deadline and respond to a heartbeat.
+ */
 public class AliveKeeper {
 
     private final static Logger logger = LoggerFactory.getLogger(AliveKeeper.class);
 
-    private ScheduledExecutorService scheduledExecutor = Executors.newScheduledThreadPool(2);
-    private ScheduledFuture<?> keepAliveFuture;
-    private ScheduledFuture<?> deadlineFuture;
+    private final ScheduledExecutorService scheduledExecutor = Executors.newScheduledThreadPool(2);
 
     private final Map<Long, KeepAlive> keepAliveMap;
     private final AtomicLong currentKeepAliveId;
 
-    private final AtomicInteger start;
+    //0: default, -1: stopped, 1: started
+    private int state = 0;
 
     public AliveKeeper() {
         keepAliveMap = new ConcurrentHashMap<>();
         currentKeepAliveId = new AtomicLong(0L);
-        start = new AtomicInteger(0);
     }
 
     public Long applyKeepAliveId() {
         return currentKeepAliveId.incrementAndGet();
     }
 
-    public KeepAliveListener keepAlive(long keepAliveId, HeartBeat heartBeat, HeartBeatTransport hbTransport) {
-        checkNotNull(heartBeat, hbTransport);
+    public synchronized KeepAliveListener keepAlive(long keepAliveId, HeartBeat heartBeat, HeartBeatTransport heartBeatTransport) {
+        if(state < 0)
+            throw new IllegalStateException("stopped!");
+        checkValid(heartBeat, heartBeatTransport);
         KeepAlive keepAlive = keepAliveMap.computeIfAbsent(keepAliveId, (k) -> {
-            KeepAlive keepAlive0 = new KeepAlive(keepAliveId, heartBeat, hbTransport);
-            long currentTime = System.currentTimeMillis();
-            keepAlive0.nextHBTime = currentTime + heartBeat.getTTL() * 1000 / 3;
-            keepAlive0.deadline = currentTime + heartBeat.getTTL();
+            KeepAlive keepAlive0 = new KeepAlive(keepAliveId, heartBeat, heartBeatTransport);
+            heartBeatTransport.addObserver(new HeartBeatObserverImpl(keepAliveId, heartBeat));
+            long now = System.currentTimeMillis();
+            keepAlive0.nextHBTime = now + heartBeat.getTTL() / 3;
+            keepAlive0.deadline = now + heartBeat.getTTL();
             return keepAlive0;
         });
-        if(start.get() == 0 && start.compareAndSet(0, 1)) {
-            startKeepAliveExecutor();
-            startDeadlineExecutor();
-        }
+        if(state == 0) start();
         return keepAlive.keepAliveListener;
     }
 
+    public synchronized void stop() {
+        scheduledExecutor.shutdownNow();
+        Iterator<KeepAlive> it = keepAliveMap.values().iterator();
+        for (; it.hasNext(); ) {
+            it.next().close();
+            it.remove();
+        }
+        state = -1;
+        logger.info("stopped...");
+    }
+
+    private void start() {
+        startKeepAliveExecutor();
+        startDeadlineExecutor();
+        state = 1;
+        logger.info("started...");
+    }
+
     private void startKeepAliveExecutor() {
-        keepAliveFuture = scheduledExecutor.scheduleAtFixedRate(() -> {
+        scheduledExecutor.scheduleAtFixedRate(() -> {
             long now = System.currentTimeMillis();
             keepAliveMap.values().stream()
-                    .filter(keepAlive -> keepAlive.heartBeat.isActiveType() && keepAlive.nextHBTime <= now)
-                    .forEach(KeepAlive::doHeartbeat);
-        }, 0, 500L, TimeUnit.MILLISECONDS);
+                    .filter(keepAlive -> keepAlive.heartBeat.isRequestPacket()
+                            && keepAlive.nextHBTime <= now
+                            && keepAlive.deadline > now)
+                    .forEach(KeepAlive::doRequest);
+        }, 500L, 500L, TimeUnit.MILLISECONDS);
     }
 
     private void startDeadlineExecutor() {
-        deadlineFuture = scheduledExecutor.scheduleAtFixedRate(() -> {
+        scheduledExecutor.scheduleAtFixedRate(() -> {
             long now = System.currentTimeMillis();
             keepAliveMap.values().removeIf(keepAlive -> {
-                if(keepAlive.deadline <= now) {
+                if (keepAlive.deadline <= now) {
+                    //only too long without heartbeat we will call destroy
+                    if (keepAlive.deadline > 0) keepAlive.destroy();
                     keepAlive.close();
+                    logger.debug("Time up! remove happen...");
                     return true;
                 }
                 return false;
             });
-        }, 0, 500L, TimeUnit.MILLISECONDS);
+        }, 1000L, 1000L, TimeUnit.MILLISECONDS);
     }
 
-    private void removeKeepAlive(long keepAliveId) {
-        keepAliveMap.remove(keepAliveId);
+    private void removeKeepAlive(KeepAlive keepAlive) {
+        //lazy remove
+        keepAlive.deadline = -1;
     }
 
     private void processHBResponse(long keepAliveId, String response) {
@@ -78,12 +105,14 @@ public class AliveKeeper {
         if(keepAlive == null) return;
 
         long now = System.currentTimeMillis();
-        HeartBeat heartBeat = keepAlive.heartBeat;
-        keepAlive.deadline = now + heartBeat.getTTL();
-        keepAlive.nextHBTime = now + heartBeat.getTTL() * 1000 / 3;
 
-        HeartBeat responseHeartBeat = new HeartBeat(null, response, keepAlive.deadline - now);
-        keepAlive.notifyListener(responseHeartBeat);
+        HeartBeat heartBeat = keepAlive.heartBeat;
+        long deadline = keepAlive.deadline;
+        keepAlive.deadline = now + heartBeat.getTTL();
+        keepAlive.nextHBTime = now + heartBeat.getTTL() / 3;
+
+        HeartBeat res = HeartBeat.buildResponse(response, deadline - now);
+        keepAlive.notifyListener(res);
     }
 
     private void processHBRequest(long keepAliveId, String request) {
@@ -93,10 +122,14 @@ public class AliveKeeper {
         long now = System.currentTimeMillis();
 
         HeartBeat heartBeat = keepAlive.heartBeat;
+        long deadline = keepAlive.deadline;
+        //only update deadline
         keepAlive.deadline = now + heartBeat.getTTL();
+        //send heartbeat response
+        keepAlive.doResponse();
 
-        HeartBeat requestHeartBeat = new HeartBeat(request, null, keepAlive.deadline - now);
-        keepAlive.notifyListener(requestHeartBeat);
+        HeartBeat req = HeartBeat.buildRequest(request, deadline - now);
+        keepAlive.notifyListener(req);
     }
 
     private KeepAlive checkTimeUp(long keepAliveId) {
@@ -106,21 +139,18 @@ public class AliveKeeper {
         long now = System.currentTimeMillis();
 
         if(keepAlive.deadline - now <= 0) {
-            logger.debug("[{}] Time up!", keepAliveId);
-            keepAliveMap.remove(keepAliveId);
-            HeartBeat exceptionHeartBeat = new HeartBeat(new HeartBeatException("Time up!"));
-            keepAlive.notifyListener(exceptionHeartBeat);
+            logger.debug("Time up! keepAliveId[{}]", keepAliveId);
+            HeartBeat ehb = HeartBeat.buildException(new HeartBeatException("Time up!"));
+            keepAlive.notifyListener(ehb);
             return null;
         }
         return keepAlive;
     }
 
-    private void checkNotNull(HeartBeat heartBeat, HeartBeatTransport hbTransport) {
-        if(heartBeat == null || heartBeat.getTTL() < 1
-                || heartBeat.getRequest() == null
-                || heartBeat.getResponse() == null
-                || heartBeat.isActiveType() && heartBeat.getEncodeRequest() == null) {
-            //logger.error("");
+    private void checkValid(HeartBeat heartBeat, HeartBeatTransport hbTransport) {
+        if(heartBeat == null || heartBeat.getTTL() < 1200
+                || heartBeat.isRequestPacket() && (heartBeat.getEncodeRequest() == null || heartBeat.getResponse() == null)
+                || !heartBeat.isRequestPacket() && (heartBeat.getEncodeResponse() == null || heartBeat.getRequest() == null)) {
             throw new IllegalArgumentException("invalid HeartBeat!");
         }
         if(hbTransport == null) {
@@ -130,6 +160,8 @@ public class AliveKeeper {
 
     private class KeepAlive {
 
+        //private long keepAliveId;
+
         private HeartBeat heartBeat;
         private HeartBeatTransport heartBeatTransport;
 
@@ -137,58 +169,66 @@ public class AliveKeeper {
         private long deadline;
 
         private KeepAliveListenerImpl keepAliveListener;
-        private HeartBeatFilter heartBeatFilter;
 
-        KeepAlive(long keepAliveId, HeartBeat heartBeat, HeartBeatTransport hbTransport) {
+        KeepAlive(long keepAliveId, HeartBeat heartBeat, HeartBeatTransport heartBeatTransport) {
+            //this.keepAliveId = keepAliveId;
             this.heartBeat = heartBeat;
-            this.heartBeatTransport = hbTransport;
-            this.keepAliveListener = new KeepAliveListenerImpl(keepAliveId);
-            this.heartBeatFilter = new HeartBeatFilterImpl(keepAliveId, this);
+            this.heartBeatTransport = heartBeatTransport;
+            this.keepAliveListener = new KeepAliveListenerImpl(this);
         }
 
         void notifyListener(HeartBeat inputHeartBeat) {
             keepAliveListener.enqueue(inputHeartBeat);
         }
 
-        void doHeartbeat() {
-            try {
-                heartBeatTransport.receive(heartBeatFilter);
-                heartBeatTransport.send(heartBeat.getEncodeRequest());
-            } catch (Exception e) {
-                logger.error("do heartbeat failed, keepAliveId[{}]");
-                HeartBeatException heartBeatException = new HeartBeatException(e);
-                HeartBeat exceptionHeartBeat = new HeartBeat(heartBeatException);
-                notifyListener(exceptionHeartBeat);
-            }
+        void doRequest() {
+            doHeartbeat(heartBeat.getEncodeRequest());
+        }
+
+        void doResponse() {
+            doHeartbeat(heartBeat.getEncodeResponse());
         }
 
         void close() {
-            try { heartBeatTransport.destroy(); } catch (Exception e) { logger.error("", e); }
             keepAliveListener.close();
+        }
+
+        void destroy() {
+            try { heartBeatTransport.destroy(); } catch (Exception e) { logger.error("", e); }
+        }
+
+        private void doHeartbeat(byte[] hbBytes) {
+            try {
+                heartBeatTransport.send(hbBytes);
+            } catch (Exception e) {
+                logger.error("do heartbeat failed, keepAliveId[{}]");
+                HeartBeat ehb = HeartBeat.buildException(new HeartBeatException(e));
+                notifyListener(ehb);
+            }
         }
 
     }
 
-    private class HeartBeatFilterImpl implements HeartBeatFilter {
+    private class HeartBeatObserverImpl implements HeartBeatObserver {
 
         private HeartBeat heartBeat;
         private long keepAliveId;
 
-        HeartBeatFilterImpl(long keepAliveId, KeepAlive keepAlive) {
+        HeartBeatObserverImpl(long keepAliveId, HeartBeat heartBeat) {
             this.keepAliveId = keepAliveId;
-            this.heartBeat = keepAlive.heartBeat;
+            this.heartBeat = heartBeat;
         }
 
         @Override
-        public boolean filter(String receivedMsg) {
-            if(heartBeat.isActiveType()) {
-                if(heartBeat.getResponse().equals(receivedMsg)) {
-                    processHBResponse(keepAliveId, receivedMsg);
+        public boolean update(String msg) {
+            if(heartBeat.isRequestPacket()) {
+                if(heartBeat.getResponse().equals(msg)) {
+                    processHBResponse(keepAliveId, msg);
                     return true;
                 }
             } else {
-                if(heartBeat.getRequest().equals(receivedMsg)) {
-                    processHBRequest(keepAliveId, receivedMsg);
+                if(heartBeat.getRequest().equals(msg)) {
+                    processHBRequest(keepAliveId, msg);
                     return true;
                 }
             }
@@ -198,16 +238,16 @@ public class AliveKeeper {
 
     private class KeepAliveListenerImpl implements KeepAliveListener {
 
-        private long keepAliveId;
+        private KeepAlive keepAlive;
 
-        private volatile boolean close;
+        private boolean close;
 
         private BlockingQueue<HeartBeat> queue = new ArrayBlockingQueue<>(1);
 
-        private ExecutorService executor = Executors.newSingleThreadExecutor();
+        private ExecutorService executor;
 
-        KeepAliveListenerImpl(long keepAliveId) {
-            this.keepAliveId = keepAliveId;
+        KeepAliveListenerImpl(KeepAlive keepAlive) {
+            this.keepAlive = keepAlive;
         }
 
         private void enqueue(HeartBeat inputHeartBeat) {
@@ -218,26 +258,30 @@ public class AliveKeeper {
         }
 
         @Override
-        public HeartBeat listen() throws InterruptedException {
+        public synchronized HeartBeat listen() {
             if(close) {
                 throw new IllegalStateException("Listener has bean closed!");
             }
+            if(executor == null) {
+                executor = Executors.newSingleThreadExecutor();
+            }
             Future<HeartBeat> future = executor.submit(() -> queue.take());
             HeartBeat heartBeat = null;
-            //todo ExecutionException???
             try {
                 heartBeat = future.get();
-            } catch (ExecutionException e) {
-                e.printStackTrace();
+            } catch (ExecutionException | InterruptedException e) {
+                //logger.error("", e);
             }
             return heartBeat;
         }
 
         @Override
-        public void close() {
-            //notify listen
-            removeKeepAlive(keepAliveId);
-            close = true;
+        public synchronized void close() {
+            if(!close) {
+                removeKeepAlive(keepAlive);
+                if(executor != null) executor.shutdownNow();
+                close = true;
+            }
         }
     }
 
