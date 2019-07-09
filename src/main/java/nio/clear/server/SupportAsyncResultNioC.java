@@ -60,12 +60,6 @@ public class SupportAsyncResultNioC extends NioConnection {
         }
     }
 
-    @Override
-    protected void finishConnect() {
-        key.interestOps(0);
-        super.finishConnect();
-    }
-
     private void read(long currentTime) throws IOException {
         ReadFuture readFuture = null;
         ByteBuffer readBuf;
@@ -98,7 +92,13 @@ public class SupportAsyncResultNioC extends NioConnection {
                 writeBuf = future.getBuf();
                 channelWrite(writeBuf, currentTime);    //IOE
                 if (writeBuf.hasRemaining()) break;
-                future.done(true);
+                if (future instanceof WriteReadFuture) {
+                    WriteReadFuture wrf = (WriteReadFuture) future;
+                    readQueue.add(wrf.getReadFuture());
+                    wrf.getWriteFuture().done(true);
+                } else {
+                    future.done(true);
+                }
                 writeQueue.poll();
             }
         } catch (IOException ioe) {
@@ -135,8 +135,11 @@ public class SupportAsyncResultNioC extends NioConnection {
     @SuppressWarnings("unchecked")
     @Override
     public WriteFuture write(String writeMsg) {
+        if (writeMsg == null) {
+            throw new NullPointerException();
+        }
         WriteFuture future = new WriteFuture(writeMsg);
-        synchronized (writeQueue) {
+        synchronized (this) {
             if(closed) {
                 logger.warn("connection is closed, write[{}] failed", writeMsg);
                 future.done(false);
@@ -152,27 +155,25 @@ public class SupportAsyncResultNioC extends NioConnection {
      * please ensure it will response a msg immediately and directly
      * @param writeMsg the content we want to send
      * @param readTarget the content we expect received
-     * @return ReadFuture
+     * @return WriteReadFuture
      */
     @SuppressWarnings("unchecked")
     @Override
-    public ReadFuture writeAndRead(String writeMsg, String readTarget) {
-        ReadFuture readFuture = new ReadFuture(readTarget);
-        if(readTarget == null) {
-            return readFuture;
+    public WriteReadFuture writeAndRead(String writeMsg, String readTarget) {
+        if (writeMsg == null || readTarget == null) {
+            throw new NullPointerException();
         }
-        synchronized (readQueue) {
+        WriteReadFuture future = new WriteReadFuture(writeMsg, readTarget);
+        synchronized (this) {
             if (closed) {
                 logger.warn("connection is closed, write[{}] failed", writeMsg);
-                readFuture.done(false);
-                return readFuture;
+                future.done(false);
+                return future;
             }
-            readQueue.add(readFuture);
-            WriteFuture writeFuture = new WriteFuture(writeMsg);
-            writeQueue.add(writeFuture);
+            writeQueue.add(future);
             interestRead = true;
             reactor.applyProcess(this);
-            return readFuture;
+            return future;
         }
     }
 
@@ -193,18 +194,16 @@ public class SupportAsyncResultNioC extends NioConnection {
             try { channel.close(); } catch (IOException ioe) { exceptionCaught(ioe);}
             try { ioListener.connectionClosed(this); } catch (Exception e) { exceptionCaught(e);}
         }
-        synchronized (writeQueue) {
-            synchronized (readQueue) {
-                for (; ; ) {
-                    ReadFuture readFuture = readQueue.poll();
-                    if (readFuture == null) break;
-                    readFuture.done(false);
-                }
-                for (; ; ) {
-                    WriteFuture writeFuture = writeQueue.poll();
-                    if (writeFuture == null) break;
-                    writeFuture.done(false);
-                }
+        synchronized (this) {
+            for (; ; ) {
+                ReadFuture readFuture = readQueue.poll();
+                if (readFuture == null) break;
+                readFuture.done(false);
+            }
+            for (; ; ) {
+                WriteFuture writeFuture = writeQueue.poll();
+                if (writeFuture == null) break;
+                writeFuture.done(false);
             }
         }
     }

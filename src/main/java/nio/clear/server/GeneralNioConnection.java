@@ -65,12 +65,6 @@ public class GeneralNioConnection extends NioConnection {
         }
     }
 
-    @Override
-    protected void finishConnect() {
-        key.interestOps(SelectionKey.OP_READ);
-        super.finishConnect();
-    }
-
     private static final int ReadHeaderState = 0;
     private static final int ReadBodyState = 1;
     private final ByteBuffer header = ByteBuffer.allocate(5);

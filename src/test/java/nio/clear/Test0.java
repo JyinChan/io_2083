@@ -35,7 +35,7 @@ public class Test0 implements IoListener {
     @Override
     public void connectionOpened(NioConnection connection) {
         logger.debug("connection opened");
-        connection.config(NioConnection.READ_IDLE_STATUS, 5000, "00000", "00002hi", false, 0);
+        connection.keepAlive(NioConnection.READ_IDLE_STATUS, 5000, "00000", "00002hi", false, 0);
         conn = (GeneralNioConnection) connection;
     }
 

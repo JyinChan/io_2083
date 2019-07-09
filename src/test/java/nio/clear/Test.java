@@ -123,7 +123,7 @@ public class Test implements IoListener {
     @Override
     public void connectionOpened(NioConnection connection) {
         logger.debug("[{}] opened", connection);
-        connection.config(NioConnection.WRITE_IDLE_STATUS, 10000, "00000", "OK", true, 30000);
+        connection.keepAlive(NioConnection.WRITE_IDLE_STATUS, 10000, "00000", "OK", true, 30000);
 
 //        bio = (SupportAsyncResultNioC) connection;
 //        Thread t = new Thread(() -> {

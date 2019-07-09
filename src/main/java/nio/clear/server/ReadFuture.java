@@ -1,13 +1,8 @@
 package nio.clear.server;
 
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-
 import java.nio.ByteBuffer;
 
 public class ReadFuture {
-
-    private final static Logger logger = LoggerFactory.getLogger(ReadFuture.class);
 
     private final Object lock = new Object();
 
@@ -17,14 +12,8 @@ public class ReadFuture {
     private String target;
 
     ReadFuture(String target) {
-        if(target == null) {
-            logger.debug("can not read a null msg");
-            result = false;
-        }
-        else {
-            readBuf = ByteBuffer.allocate(target.length());
-            this.target = target;
-        }
+        this.readBuf = ByteBuffer.allocate(target.length());
+        this.target = target;
     }
 
     ByteBuffer getBuf() {

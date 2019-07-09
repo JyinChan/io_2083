@@ -35,12 +35,12 @@ public abstract class NioConnection implements Processable {
     private int idleInterval;
     private int idleIntervalBak;
 
-    private boolean isPingActive;
+    private boolean pingInitiator;
     private String pingRequest;
     private String pingResponse;
     private int pingTimeout;
 
-    private volatile boolean isConfigured;
+    private volatile boolean configured;
 
     protected SocketChannel channel;
     protected volatile IoListener ioListener;
@@ -55,10 +55,10 @@ public abstract class NioConnection implements Processable {
         this.ioListener = ioListener;
     }
 
-    public void config(int interestedIdleStatus, int idleIntervalMillis, String pingRequest, String pingResponse, boolean isPingActive, int pingTimeoutMillis) {
-        if(isConfigured)
+    public void keepAlive(int interestedIdleStatus, int idleIntervalMillis, String pingRequest, String pingResponse, boolean pingInitiator, int pingTimeoutMillis) {
+        if(configured)
             throw new IllegalStateException("has configured!");
-        isConfigured = true;
+        configured = true;
         //check simply
         if(interestedIdleStatus != READ_IDLE_STATUS &&
                 interestedIdleStatus != WRITE_IDLE_STATUS &&
@@ -69,11 +69,11 @@ public abstract class NioConnection implements Processable {
         if(pingRequest != null && pingRequest.equals(pingResponse))
             throw new IllegalArgumentException("pingRequest must neq pingResponse");
         this.idleStatus = interestedIdleStatus;
-        this.idleInterval = idleIntervalMillis<1000 ? 1000:idleIntervalMillis;
+        this.idleInterval = this.idleIntervalBak = idleIntervalMillis<1000 ? 1000:idleIntervalMillis;
         this.pingRequest = pingRequest;
         this.pingResponse = pingResponse;
-        this.isPingActive = isPingActive;
-        this.pingTimeout = isPingActive ? (pingTimeoutMillis < 1000 ? 1000 : pingTimeoutMillis) : 0;
+        this.pingInitiator = pingInitiator;
+        this.pingTimeout = pingInitiator ? (pingTimeoutMillis < 1000 ? 1000 : pingTimeoutMillis) : 0;
     }
 
     public void setIoListener(IoListener listener) {
@@ -91,6 +91,7 @@ public abstract class NioConnection implements Processable {
                 return;
             }
         }
+        key.interestOps(SelectionKey.OP_READ);
         connectionId = ++autoIncrementId;
         if (regFuture != null) regFuture.done(this);
         try { ioListener.connectionOpened(this); } catch (Exception e) { exceptionCaught(e);}
@@ -132,7 +133,7 @@ public abstract class NioConnection implements Processable {
         if(currentTime - lastIoTime > idleInterval) {
             if ((idleStatus & WAIT_STATUS) == 0) {
                 lastIdleTime = currentTime;
-                if(isPingActive) {
+                if(pingInitiator) {
                     writeAndRead(pingRequest, pingResponse);
                     mark();
                 }

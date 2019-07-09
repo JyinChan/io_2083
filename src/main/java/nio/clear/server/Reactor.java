@@ -103,6 +103,7 @@ public class Reactor {
                 int readyChannels = 0;
                 try {
                     readyChannels = selector.select(SELECT_TIMEOUT);
+                    System.out.println("select wake " + readyChannels);
                 } catch (IOException ioe) {
                     //I don't know how it perform(normal or not in next select) after a IOException thrown.
                     try { Thread.sleep(SELECT_TIMEOUT); } catch (InterruptedException ignore) {}
@@ -180,12 +181,11 @@ public class Reactor {
     }
 
     private void doConnectionReg(NioConnection connection) {
-        int ops = 0;
-        boolean isConnected = connection.channel.isConnected();
-        if(!isConnected) ops = SelectionKey.OP_CONNECT;
+        boolean connected = connection.channel.isConnected();
+        int ops = connected ? 0 : SelectionKey.OP_CONNECT;
         connection.key = register(connection.channel, ops, connection);
         if(connection.key != null) {
-            if(isConnected) {
+            if(connected) {
                 connection.finishConnect();
             }
         } else {
